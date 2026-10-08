@@ -47,7 +47,7 @@ git clone https://github.com/Param2596/firestick-pc-remote.git
 cd firestick-pc-remote
 ```
 
-`setup.bat` installs the tray libraries, downloads `adb` if it is missing, and puts a **Fire Remote** shortcut on the desktop and in Startup. The Startup shortcut comes up off, so the phone keeps the remote until you click the icon. Then it asks for the phone's pairing code. No cable.
+`setup.bat` installs the tray libraries, downloads `adb` if it is missing, and puts a **Fire Remote** shortcut on the desktop and in Startup. The Startup shortcut comes up off, so the phone keeps the remote until you click the icon. First-time setup asks for a pairing code. After a reboot it only needs the main Wireless debugging IP and port.
 
 On the phone, before you type `YES`:
 
@@ -60,7 +60,7 @@ The code expires quickly. If pairing fails, open the popup again. If the PC stil
 
 Click the round icon by the clock. Gray is off, green is on. That tray app is the switch from then on.
 
-To pair again later, double-click `setup.bat` or run `python ar_remote.py --pair`.
+After a phone reboot, turn Wireless debugging on and run `python ar_remote.py --connect`. Use **IP address & Port** from the main Wireless debugging page. You do not need a pairing code unless this PC was never paired, or you revoked USB debugging. First-time pairing is `python ar_remote.py --pair`.
 
 If nothing connects, run `python ar_remote.py` in a window and read the error. `python ar_remote.py --list` prints the phone's input devices. The remote usually shows up as `AR Keyboard`.
 
@@ -81,7 +81,7 @@ Right-click the icon:
 | Mode sound | Plays a short sound when Alexa changes mode. |
 | Quit | Turns forwarding off and exits. |
 
-After the phone reboots, turn Wireless debugging back on, then click the tray icon off and on.
+After the phone reboots, turn Wireless debugging back on, then run `python ar_remote.py --connect` if the tray cannot find the phone.
 
 When you are done, or when you leave home, turn Wireless debugging off.
 
@@ -141,7 +141,7 @@ A VPN that blocks the local network will stop the PC from reaching the phone. Tu
 
 - Windows only. The Fire TV remote stays paired to the Android phone, not to the PC's Bluetooth.
 - Wireless debugging has to stay on the whole time the tray app is receiving buttons. Turning it off stops the helper. There is no separate Android app in this repo.
-- After a phone reboot, turn Wireless debugging back on and toggle the tray app off and on.
+- After a phone reboot, turn Wireless debugging back on. If the tray cannot find the phone, run `python ar_remote.py --connect`.
 - Netflix, Prime Video, and the other shortcut buttons never show up as keys, so they cannot be mapped.
 - The remote microphone cannot be streamed to the PC. Alexa only changes mode.
 - Power is ignored, so the remote cannot sleep the PC.
@@ -160,7 +160,7 @@ These are created locally and are not in the repo:
 
 ## When it stops working
 
-- **No phone found.** Wireless debugging is off, the phone is on another network, or a VPN is blocking LAN traffic. On your home Wi-Fi, run `python ar_remote.py --pair` again.
+- **No phone found after a reboot.** Wireless debugging is off, or the port changed. Turn it on and run `python ar_remote.py --connect` with the main-page IP and port. Do not use the pairing-popup port. First-time pairing is still `python ar_remote.py --pair`. A VPN that blocks LAN traffic will also fail.
 - **Not authorized.** Unlock the phone and tap Allow.
 - **The remote still drives the phone.** The tray app is off, or the grabber on the phone is not running. Turn the icon off and on.
 - **Buttons do nothing on the PC.** Bluetooth dropped. Reconnect the Fire TV remote to the phone, then toggle the tray icon.

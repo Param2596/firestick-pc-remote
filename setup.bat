@@ -24,8 +24,17 @@ echo.
 %RUN% "%~dp0ar_remote.py" --setup
 if errorlevel 1 goto fail
 echo.
-%RUN% "%~dp0ar_remote.py" --pair
-if errorlevel 1 goto fail
+echo After a phone reboot you usually do not need a pairing code.
+echo Turn Wireless debugging on, then use IP address and Port from the MAIN page.
+echo.
+%RUN% "%~dp0ar_remote.py" --connect
+if errorlevel 1 (
+  echo.
+  echo Connect failed. Trying first-time pairing with a 6-digit code...
+  echo.
+  %RUN% "%~dp0ar_remote.py" --pair
+  if errorlevel 1 goto fail
+)
 call "%~dp0run.bat"
 echo.
 echo Done. Click the round icon by the clock when you want the remote on this PC.

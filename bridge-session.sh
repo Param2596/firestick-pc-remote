@@ -29,8 +29,15 @@ while [ -e "$dev" ]; do
     echo "grab $dev" >>/data/local/tmp/bridge.log
     {
       printf '%s\n' "$TOKEN"
-      "$GRAB" "$dev"
-    } | toybox nc -w 3 -q 1 "$PC" "$PORT"
+      "$GRAB" "$dev" &
+      grab=$!
+      while kill -0 "$grab" 2>/dev/null; do
+        sleep 20
+        printf '.\n' || break
+      done
+      kill "$grab" 2>/dev/null
+      wait "$grab" 2>/dev/null
+    } | toybox nc -q 1 "$PC" "$PORT"
     echo "released $dev" >>/data/local/tmp/bridge.log
     delay=2
   fi

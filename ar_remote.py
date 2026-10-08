@@ -85,8 +85,9 @@ CURSOR_MOVE = {
     "KEY_RIGHT": (1, 0),
 }
 CLICK_KEYS = {"KEY_ENTER", "KEY_SELECT", "KEY_KPENTER"}
-MODES = ("controls", "volume", "cursor")
-MODE_TITLES = {"controls": "Controls", "volume": "Volume", "cursor": "Cursor"}
+MODES = ("controls", "volume", "cursor", "tv")
+MODE_TITLES = {"controls": "Controls", "volume": "Volume", "cursor": "Cursor", "tv": "TV"}
+APPS_MENU = Path(__file__).with_name("app_menu.py")
 
 mode = "controls"
 cursor_held: set[str] = set()
@@ -378,7 +379,7 @@ Turn it off when you are finished, and leave it off away from home.
 def confirm_private_network() -> None:
     say(NETWORK_WARNING)
     answer = input("Type YES to continue on a private network: ").strip()
-    if answer != "YES":
+    if answer.upper() != "YES":
         raise SystemExit("Stopped. Connect to a private network, then run this again.")
 
 
@@ -393,27 +394,56 @@ def remember_device(endpoint: str) -> bool:
     return False
 
 
-def pair_phone() -> None:
-    """Pair over Wi-Fi with the code on the phone. No USB cable."""
+def connect_phone() -> None:
+    """Reconnect after a reboot. Uses the main Wireless debugging IP:port, not a pairing code."""
     confirm_private_network()
     ensure_adb()
     run_adb(["start-server"])
+    saved = ENDPOINT_FILE.read_text(encoding="utf-8").strip() if ENDPOINT_FILE.exists() else ""
+    if saved and remember_device(saved):
+        say("Phone is already connected. Click the tray icon.")
+        return
+    say("After a phone reboot you usually do NOT need a pairing code.")
+    say("On the phone, turn Wireless debugging on and stay on that page.")
+    say("Use IP address & Port from the MAIN page. Do not open Pair device with pairing code.")
+    endpoint = input("IP and port from the Wireless debugging page, such as 192.168.1.20:41403: ").strip()
+    if not re.fullmatch(r"\d+\.\d+\.\d+\.\d+:\d+", endpoint):
+        raise SystemExit("That is not an IP and port. Use the main Wireless debugging page, not the pairing popup.")
+    if remember_device(endpoint):
+        say("Connected over Wi-Fi. Click the tray icon.")
+        return
+    raise SystemExit(
+        "Could not connect. If this PC has never been paired, run: python ar_remote.py --pair\n"
+        "If it has, the port on the phone changed. Copy IP address & Port again while Wireless debugging is on."
+    )
+
+
+def pair_phone() -> None:
+    """First-time Wi-Fi pairing with the 6-digit code. After a reboot, use --connect instead."""
+    confirm_private_network()
+    ensure_adb()
+    run_adb(["start-server"])
+    say("This is only needed the first time, or if you revoked USB debugging authorizations.")
     say("On the phone, open Developer options, then Wireless debugging.")
     say("Tap Pair device with pairing code and leave that popup open.")
-    endpoint = input("IP and port from the popup, such as 192.168.1.20:37123: ").strip()
+    say("The popup's port is NOT the same as IP address & Port on the main page.")
+    endpoint = input("IP and port from the PAIRING popup, such as 192.168.1.20:37123: ").strip()
     code = input("6-digit pairing code: ").strip()
     if not re.fullmatch(r"\d+\.\d+\.\d+\.\d+:\d+", endpoint) or not re.fullmatch(r"\d{6}", code):
-        raise SystemExit("Use the IP, port, and 6-digit code shown on the phone popup.")
+        raise SystemExit("Use the IP, port, and 6-digit code shown on the pairing popup.")
     text = adb_text(["pair", endpoint, code], timeout=40)
     say(text.strip())
     if "successfully paired" not in text.lower():
-        raise SystemExit("Pairing failed. The code expires quickly. Open the popup again and retry.")
+        raise SystemExit(
+            "Pairing failed. The code expires in about 2 minutes. "
+            "Open Pair device with pairing code again. Do not use the main-page port here."
+        )
     time.sleep(1)
     for found in discover_mdns():
         if remember_device(found):
             say("Paired over Wi-Fi. You can close the popup.")
             return
-    say("Paired. Close the popup and read IP address & Port on the Wireless debugging page.")
+    say("Paired. Close the popup. Now copy IP address & Port from the MAIN Wireless debugging page.")
     connect_to = input("IP and port from that page: ").strip()
     if not re.fullmatch(r"\d+\.\d+\.\d+\.\d+:\d+", connect_to):
         raise SystemExit("That is not an IP and port. Look at the Wireless debugging page again.")
@@ -469,7 +499,8 @@ def choose_serial() -> str:
             "and check 'Always allow from this computer'."
         )
     raise SystemExit(
-        "No phone found. On a private network, run: python ar_remote.py --pair"
+        "No phone found. After a reboot run: python ar_remote.py --connect\n"
+        "First time only, run: python ar_remote.py --pair"
     )
 
 
@@ -707,11 +738,39 @@ def repeat_loop() -> None:
 threading.Thread(target=repeat_loop, daemon=True).start()
 
 
+def open_apps() -> None:
+    """Bring up the TV app menu. Home does this in TV mode."""
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    hwnd = user32.FindWindowW(None, "Apps")
+    if hwnd:
+        user32.ShowWindow(hwnd, 9)
+        user32.keybd_event(0x12, 0, 0, 0)
+        user32.SetForegroundWindow(hwnd)
+        user32.keybd_event(0x12, 0, 2, 0)
+        return
+    exe = Path(sys.executable)
+    pythonw = exe.with_name("pythonw.exe")
+    if not pythonw.exists():
+        pythonw = exe
+    subprocess.Popen([str(pythonw), str(APPS_MENU)], creationflags=NO_WINDOW)
+
+
 def apply_key(name: str, action: str, held: dict[str, tuple[int, bool]], seen_ignored: set[str]) -> None:
     global mouse_left_down
     if name == "KEY_SEARCH":
         if action == "DOWN":
             toggle_mode(held)
+        return
+    if mode == "tv" and name in {"KEY_HOME", "KEY_HOMEPAGE"}:
+        if action == "DOWN":
+            open_apps()
+            print(name)
+        return
+    if mode == "tv" and name in {"KEY_UP", "KEY_DOWN", "KEY_LEFT", "KEY_RIGHT"}:
+        mapped = binding_for(name)
+        if mapped is not None and action == "DOWN":
+            pulse_key(mapped[0], mapped[1])
+            print(name)
         return
     if mode != "cursor" and name in REPEAT_KEYS:
         mapped = binding_for(name)
@@ -749,12 +808,6 @@ def apply_key(name: str, action: str, held: dict[str, tuple[int, bool]], seen_ig
         if action == "DOWN":
             send_mouse(MOUSEEVENTF_RIGHTDOWN)
             send_mouse(MOUSEEVENTF_RIGHTUP)
-            print(name)
-        return
-    if mode == "controls" and name == "KEY_BACK":
-        if action == "DOWN":
-            send_key(0x7A, False, up=False)
-            send_key(0x7A, False, up=True)
             print(name)
         return
     chord = CHORDS.get(name)
@@ -968,6 +1021,16 @@ def ensure_phone_bridge() -> None:
     start_phone_bridge(serial)
 
 
+def tune_link(conn: socket.socket) -> None:
+    """Notice a phone that went idle and dropped Wi-Fi, instead of holding the dead link."""
+    try:
+        conn.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        if hasattr(socket, "SIO_KEEPALIVE_VALS"):
+            conn.ioctl(socket.SIO_KEEPALIVE_VALS, (1, 45_000, 10_000))
+    except OSError:
+        pass
+
+
 def serve_bridge(stop: threading.Event) -> None:
     token = bridge_token().encode()
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -984,6 +1047,7 @@ def serve_bridge(stop: threading.Event) -> None:
             except (TimeoutError, socket.timeout):
                 continue
             conn.settimeout(0.5)
+            tune_link(conn)
             held: dict[str, tuple[int, bool]] = {}
             seen_ignored: set[str] = set()
             pending = b""
@@ -1118,17 +1182,27 @@ def main() -> None:
     parser.add_argument("--tray", action="store_true", help="Show a tray toggle instead of running in this window.")
     parser.add_argument("--on", action="store_true", help="With --tray, start already forwarding.")
     parser.add_argument("--setup", action="store_true", help="Download adb if needed and create shortcuts.")
-    parser.add_argument("--pair", action="store_true", help="Pair the phone over Wi-Fi. No USB cable.")
+    parser.add_argument("--pair", action="store_true", help="First-time Wi-Fi pairing with the 6-digit code.")
+    parser.add_argument(
+        "--connect",
+        action="store_true",
+        help="Reconnect after a phone reboot using the main Wireless debugging IP:port.",
+    )
     args = parser.parse_args()
 
     if args.pair:
         pair_phone()
         return
 
+    if args.connect:
+        connect_phone()
+        return
+
     if args.setup:
         ensure_adb()
         install_shortcuts()
-        say("Next, on a private network: python ar_remote.py --pair")
+        say("Next, on a private network: python ar_remote.py --connect")
+        say("Only run python ar_remote.py --pair the first time, or if pairing was revoked.")
         return
 
     if args.tray:
