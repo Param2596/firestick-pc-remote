@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import re
 import secrets
+import string
 import shutil
 import socket
 import subprocess
@@ -30,8 +31,10 @@ SOUND_FILE = Path(__file__).with_name("sound.txt")
 CHIME_FILE = Path(__file__).with_name("mode.wav")
 BRIDGE_FILE = Path(__file__).with_name("bridge.sh")
 BRIDGE_SESSION = Path(__file__).with_name("bridge-session.sh")
+RESTART_BRIDGE = Path(__file__).with_name("restart-bridge.sh")
 BRIDGE_SECRET = Path(__file__).with_name("bridge.txt")
 BRIDGE_PORT = 47655
+PHONE_BRIDGE_CONF = "/data/local/tmp/bridge.conf"
 REMOTE_NAME_HINTS = ("ar keyboard", "ar", "amazon", "fire tv", "firetv")
 
 # Linux evdev name -> (virtual-key, extended).
@@ -362,6 +365,98 @@ def discover_mdns() -> list[str]:
     return found
 
 
+def discover_mdns_pairing() -> tuple[str, int] | None:
+    text = adb_text(["mdns", "services"], timeout=10)
+    for line in text.splitlines():
+        if "_adb-tls-pairing._tcp" not in line:
+            continue
+        match = re.search(r"(\d+\.\d+\.\d+\.\d+):(\d+)", line)
+        if match:
+            return match.group(1), int(match.group(2))
+    return None
+
+
+def discover_mdns_connect_for_ip(ip: str) -> str | None:
+    text = adb_text(["mdns", "services"], timeout=10)
+    for line in text.splitlines():
+        if "_adb-tls-connect._tcp" not in line or ip not in line:
+            continue
+        match = re.search(rf"({re.escape(ip)}:\d+)", line)
+        if match:
+            return match.group(1)
+    return None
+
+
+def adb_pairing_ok(text: str) -> bool:
+    lowered = text.lower()
+    return "successfully paired" in lowered or "already paired" in lowered
+
+
+def random_adb_token(length: int) -> str:
+    alphabet = string.ascii_letters + string.digits
+    return "".join(secrets.choice(alphabet) for _ in range(length))
+
+
+def show_pair_qr() -> str:
+    """Print a QR code for the phone to scan; return the pairing password for adb pair."""
+    try:
+        import qrcode
+    except ImportError:
+        raise SystemExit("QR pairing needs the qrcode package. Run: pip install qrcode")
+    name = f"ADB_WIFI_{random_adb_token(14)}-{random_adb_token(6)}"
+    password = random_adb_token(21)
+    payload = f"WIFI:T:ADB;S:{name};P:{password};;"
+    qr = qrcode.QRCode(border=1)
+    qr.add_data(payload)
+    qr.make(fit=True)
+    qr.print_ascii(invert=True)
+    return password
+
+
+def wait_mdns_pairing(seconds: float = 120) -> tuple[str, int] | None:
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        found = discover_mdns_pairing()
+        if found:
+            return found
+        time.sleep(1)
+    return None
+
+
+def wait_mdns_connect(ip: str, seconds: float = 20) -> str | None:
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        endpoint = discover_mdns_connect_for_ip(ip)
+        if endpoint:
+            return endpoint
+        for found in discover_mdns():
+            if found.startswith(f"{ip}:"):
+                return found
+        time.sleep(1)
+    return None
+
+
+def finish_wifi_session(phone_ip_hint: str | None = None) -> None:
+    """After adb pair, connect and save endpoint.txt."""
+    time.sleep(1)
+    if phone_ip_hint:
+        endpoint = wait_mdns_connect(phone_ip_hint)
+        if endpoint and remember_device(endpoint):
+            say("Paired over Wi-Fi. Unplug any cable. The tray icon is the switch from here.")
+            return
+    for found in discover_mdns():
+        if remember_device(found):
+            say("Paired over Wi-Fi. Unplug any cable. The tray icon is the switch from here.")
+            return
+    say("Paired. Close any popup. Copy IP address & Port from the MAIN Wireless debugging page.")
+    connect_to = input("IP and port from that page: ").strip()
+    if not re.fullmatch(r"\d+\.\d+\.\d+\.\d+:\d+", connect_to):
+        raise SystemExit("That is not an IP and port. Look at the Wireless debugging page again.")
+    if not remember_device(connect_to):
+        raise SystemExit(f"Could not connect to {connect_to}. Check Wireless debugging is still on.")
+    say("Paired over Wi-Fi. Unplug any cable. The tray icon is the switch from here.")
+
+
 NETWORK_WARNING = """
 DO NOT DO THIS ON PUBLIC WI-FI.
 
@@ -433,23 +528,44 @@ def pair_phone() -> None:
         raise SystemExit("Use the IP, port, and 6-digit code shown on the pairing popup.")
     text = adb_text(["pair", endpoint, code], timeout=40)
     say(text.strip())
-    if "successfully paired" not in text.lower():
+    if not adb_pairing_ok(text):
         raise SystemExit(
             "Pairing failed. The code expires in about 2 minutes. "
             "Open Pair device with pairing code again. Do not use the main-page port here."
         )
-    time.sleep(1)
-    for found in discover_mdns():
-        if remember_device(found):
-            say("Paired over Wi-Fi. You can close the popup.")
-            return
-    say("Paired. Close the popup. Now copy IP address & Port from the MAIN Wireless debugging page.")
-    connect_to = input("IP and port from that page: ").strip()
-    if not re.fullmatch(r"\d+\.\d+\.\d+\.\d+:\d+", connect_to):
-        raise SystemExit("That is not an IP and port. Look at the Wireless debugging page again.")
-    if not remember_device(connect_to):
-        raise SystemExit(f"Could not connect to {connect_to}. Check Wireless debugging is still on.")
-    say("Paired over Wi-Fi. Unplug any cable. The tray icon is the switch from here.")
+    finish_wifi_session()
+
+
+def pair_phone_qr() -> None:
+    """First-time Wi-Fi pairing: show a QR code for the phone to scan."""
+    confirm_private_network()
+    ensure_adb()
+    run_adb(["start-server"])
+    mdns = adb_text(["mdns", "check"], timeout=10).strip()
+    if mdns and "mdns" not in mdns.lower():
+        say(mdns)
+    say("This is only needed the first time, or if you revoked USB debugging authorizations.")
+    say("On the phone: Developer options > Wireless debugging > Pair device with QR code.")
+    say("Scan the QR code below with the phone camera (not the pairing-code popup).")
+    say("")
+    password = show_pair_qr()
+    say("")
+    say("Waiting for the phone to show up on the network (scan the QR now)...")
+    found = wait_mdns_pairing()
+    if not found:
+        raise SystemExit(
+            "Timed out waiting for the phone. Check same Wi-Fi, VPN off, and that you scanned the QR. "
+            "Try again or use: python ar_remote.py --pair"
+        )
+    ip, pair_port = found
+    say(f"Found pairing service at {ip}:{pair_port}")
+    text = adb_text(["pair", f"{ip}:{pair_port}", password], timeout=40)
+    say(text.strip())
+    if not adb_pairing_ok(text):
+        raise SystemExit(
+            "Pairing failed after QR scan. Try again with a fresh QR, or use: python ar_remote.py --pair"
+        )
+    finish_wifi_session(ip)
 
 
 def choose_serial() -> str:
@@ -977,21 +1093,42 @@ def phone_bridge_alive(serial: str) -> bool:
     return "No such file" not in check and check.strip() != ""
 
 
+def write_phone_bridge_conf(serial: str, pc_ip: str, token: str) -> None:
+    """Save PC/PORT/TOKEN on the phone so Shizuku rish can restart without adb."""
+    body = f"PC={pc_ip}\nPORT={BRIDGE_PORT}\nTOKEN={token}\n"
+    local = Path(__file__).with_name("bridge.conf.tmp")
+    try:
+        local.write_text(body, encoding="utf-8", newline="\n")
+        pushed = run_adb(["-s", serial, "push", str(local), PHONE_BRIDGE_CONF])
+        if pushed.returncode != 0:
+            raise SystemExit(pushed.stdout + pushed.stderr)
+    finally:
+        local.unlink(missing_ok=True)
+
+
+def push_phone_helpers(serial: str, pc_ip: str, token: str) -> None:
+    install_grabber(serial)
+    for local, remote in (
+        (BRIDGE_FILE, "/data/local/tmp/bridge.sh"),
+        (BRIDGE_SESSION, "/data/local/tmp/bridge-session.sh"),
+        (RESTART_BRIDGE, "/data/local/tmp/restart-bridge.sh"),
+    ):
+        if not local.exists():
+            raise SystemExit(f"{local.name} is missing.")
+        pushed = run_adb(["-s", serial, "push", str(local), remote])
+        if pushed.returncode != 0:
+            raise SystemExit(pushed.stdout + pushed.stderr)
+        run_adb(["-s", serial, "shell", f"chmod 755 {remote}"])
+    write_phone_bridge_conf(serial, pc_ip, token)
+
+
 def start_phone_bridge(serial: str) -> None:
     host = serial.split(":")[0] if ":" in serial else phone_ip(serial)
     if not host:
         raise SystemExit("Could not tell which IP the phone is using.")
     pc_ip = pc_ip_toward(host)
     token = bridge_token()
-    install_grabber(serial)
-    for local, remote in (
-        (BRIDGE_FILE, "/data/local/tmp/bridge.sh"),
-        (BRIDGE_SESSION, "/data/local/tmp/bridge-session.sh"),
-    ):
-        pushed = run_adb(["-s", serial, "push", str(local), remote])
-        if pushed.returncode != 0:
-            raise SystemExit(pushed.stdout + pushed.stderr)
-        run_adb(["-s", serial, "shell", f"chmod 755 {remote}"])
+    push_phone_helpers(serial, pc_ip, token)
     # Stop an older copy, then the adb-attached grabber, so the new one can take the remote.
     run_adb(["-s", serial, "shell", "pid=$(cat /data/local/tmp/bridge.pid 2>/dev/null); [ -n \"$pid\" ] && kill $pid"], timeout=8)
     run_adb(["-s", serial, "shell", "pkill grabevent"], timeout=5)
@@ -1001,9 +1138,25 @@ def start_phone_bridge(serial: str) -> None:
     if phone_bridge_alive(serial):
         say(f"Phone helper is running and will call this PC at {pc_ip}:{BRIDGE_PORT}.")
         say("Phone helper is asleep until the remote connects over Bluetooth.")
-        say("Wireless debugging can be turned off. A phone reboot needs it on once, to start the helper again.")
+        say("Wireless debugging can be turned off while the helper runs.")
+        say("After a phone reboot: start Shizuku, then rish → sh /data/local/tmp/restart-bridge.sh")
     else:
         say("The phone helper did not stay running.")
+
+
+def push_helper_only() -> None:
+    """Refresh grabber/scripts/conf on the phone without opening the tray."""
+    ensure_adb()
+    run_adb(["start-server"])
+    serial = choose_serial()
+    host = serial.split(":")[0] if ":" in serial else phone_ip(serial)
+    if not host:
+        raise SystemExit("Could not tell which IP the phone is using.")
+    pc_ip = pc_ip_toward(host)
+    token = bridge_token()
+    push_phone_helpers(serial, pc_ip, token)
+    say(f"Pushed helper and {PHONE_BRIDGE_CONF} ({pc_ip}:{BRIDGE_PORT}).")
+    say("Start it with the green tray, or on the phone: sh /data/local/tmp/restart-bridge.sh")
 
 
 def ensure_phone_bridge() -> None:
@@ -1184,9 +1337,19 @@ def main() -> None:
     parser.add_argument("--setup", action="store_true", help="Download adb if needed and create shortcuts.")
     parser.add_argument("--pair", action="store_true", help="First-time Wi-Fi pairing with the 6-digit code.")
     parser.add_argument(
+        "--pair-qr",
+        action="store_true",
+        help="First-time Wi-Fi pairing: show a QR code for Pair device with QR code on the phone.",
+    )
+    parser.add_argument(
         "--connect",
         action="store_true",
         help="Reconnect after a phone reboot using the main Wireless debugging IP:port.",
+    )
+    parser.add_argument(
+        "--push-helper",
+        action="store_true",
+        help="Push grabevent, bridge scripts, and bridge.conf to the phone without opening the tray.",
     )
     args = parser.parse_args()
 
@@ -1194,15 +1357,23 @@ def main() -> None:
         pair_phone()
         return
 
+    if args.pair_qr:
+        pair_phone_qr()
+        return
+
     if args.connect:
         connect_phone()
+        return
+
+    if args.push_helper:
+        push_helper_only()
         return
 
     if args.setup:
         ensure_adb()
         install_shortcuts()
         say("Next, on a private network: python ar_remote.py --connect")
-        say("Only run python ar_remote.py --pair the first time, or if pairing was revoked.")
+        say("Only run python ar_remote.py --pair or --pair-qr the first time, or if pairing was revoked.")
         return
 
     if args.tray:
